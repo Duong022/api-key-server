@@ -1,1 +1,1 @@
-flask
+flaskFlask-SQLAlchemypsycopg2-binarygunicorn

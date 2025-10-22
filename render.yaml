@@ -1,11 +1,24 @@
 services:
+  # 1. Dịch vụ Web (Server Python của bạn)
   - type: web
     name: api-key-server
     env: python
-    buildCommand: "pip install -r requirements.txt" # Thêm lệnh build
-    startCommand: "python server.py"
     plan: free
-    disks:
-      - name: data-disk # Tên của ổ đĩa
-        mountPath: /data # Gắn ổ đĩa vào thư mục /data
-        sizeGB: 1
+    # Lệnh build: Cài đặt thư viện VÀ tạo bảng database
+    buildCommand: "pip install -r requirements.txt; python -c 'from server import create_db; create_db()'"
+    startCommand: "gunicorn server:app" # Dùng Gunicorn cho ổn định
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: api-key-db # Phải khớp với tên database bên dưới
+          property: connectionString
+      - key: APP_SECRET_KEY
+        sync: false # BẮT BUỘC: Bạn vẫn phải tự set key này trong Environment
+
+  # 2. Dịch vụ Database (PostgreSQL)
+  - type: psql
+    name: api-key-db
+    plan: free # Gói database miễn phí
+    databaseName: apikeys
+    user: admin
+

@@ -3,55 +3,68 @@ from flask import (
     Flask, request, jsonify, session,
     redirect, url_for, render_template_string, abort
 )
+from flask_sqlalchemy import SQLAlchemy
 import json, os
 
 app = Flask(__name__)
 
 # ===================== SỬA ĐỔI BẢO MẬT =====================
 # BẮT BUỘC: Bạn phải đặt biến này trong Environment Variables trên Render
-# (Ví dụ: một chuỗi ngẫu nhiên dài 32 ký tự)
 app.secret_key = os.environ.get("APP_SECRET_KEY")
 if not app.secret_key:
     # App sẽ không khởi động nếu thiếu key này
     raise ValueError("Chưa đặt APP_SECRET_KEY trong Environment Variables!")
 
-# ===================== SỬA ĐỔI LƯU TRỮ =====================
-# Render Disks được gắn vào /data
-# Chúng ta sẽ lưu file keys.json ở đó để nó không bị mất khi server khởi động lại.
-DATA_DIR = os.environ.get("RENDER_DISK_MOUNT_PATH", "/data")
-KEYS_FILE = os.path.join(DATA_DIR, "keys.json")
+# ===================== SỬA ĐỔI LƯU TRỮ (DATABASE) =====================
+# Lấy DATABASE_URL (Render tự động cung cấp qua envVars trong render.yaml)
+db_url = os.environ.get('DATABASE_URL')
+if not db_url:
+    raise ValueError("Chưa đặt DATABASE_URL!")
 
-# Fallback cho local development (nếu chạy ở máy bạn, nó sẽ lưu ở thư mục hiện tại)
-if not os.path.exists(DATA_DIR) and not os.environ.get("RENDER"):
-    print("Cảnh báo: Không tìm thấy /data. Chạy ở chế độ local dev, lưu key vào '.'")
-    DATA_DIR = "."
-    KEYS_FILE = os.path.join(DATA_DIR, "keys.json")
+# Fix lỗi "postgresql://" mà Heroku/Render hay dùng
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-# Đảm bảo thư mục data tồn tại (chỉ chạy 1 lần)
-os.makedirs(DATA_DIR, exist_ok=True)
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 
-# Mặc định tạo file keys.json nếu chưa có
-if not os.path.exists(KEYS_FILE):
-    print(f"Không tìm thấy {KEYS_FILE}, tạo file key mặc định...")
-    with open(KEYS_FILE, "w") as f:
-        json.dump({"valid_keys": ["DUONG123", "VIP2025", "TESTKEY"]}, f, indent=4)
+# Định nghĩa Bảng (Model) để lưu API keys
+class ApiKey(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    key = db.Column(db.String(100), unique=True, nullable=False)
 
-def load_keys():
+    def __repr__(self):
+        return f'<ApiKey {self.key}>'
+
+def create_db():
+    """Hàm này được gọi bởi render.yaml (buildCommand) để tạo bảng."""
+    print("Connecting to DB and creating tables...")
     try:
-        with open(KEYS_FILE, "r") as f:
-            return json.load(f)["valid_keys"]
-    except FileNotFoundError:
-        # Xử lý nếu file bị xóa thủ công
-        with open(KEYS_FILE, "w") as f:
-            json.dump({"valid_keys": []}, f, indent=4)
-        return []
+        with app.app_context():
+            db.create_all()
+        print("Database tables created successfully (hoặc đã tồn tại).")
+    except Exception as e:
+        print(f"Lỗi khi tạo database: {e}")
+        # Thử tạo key mặc định nếu bảng đã có
+        try:
+            init_default_keys()
+        except Exception as e2:
+            print(f"Lỗi khi thêm key mặc định: {e2}")
 
-def save_keys(keys):
-    with open(KEYS_FILE, "w") as f:
-        json.dump({"valid_keys": keys}, f, indent=4)
+def init_default_keys():
+    """Thêm key mặc định nếu database trống."""
+    with app.app_context():
+        if ApiKey.query.count() == 0:
+            print("Database trống, thêm keys mặc định...")
+            default_keys = ["DUONG123", "VIP2025", "TESTKEY"]
+            for k in default_keys:
+                if not ApiKey.query.filter_by(key=k).first():
+                    db.session.add(ApiKey(key=k))
+            db.session.commit()
+            print("Đã thêm keys mặc định.")
 
-# ADMIN ACCOUNTS: username -> password
-# ⚠️ Vẫn là plain text, bạn nên đổi mật khẩu này!
+# ADMIN ACCOUNTS
 ADMINS = {
     "duong2024": "duongpizza"
 }
@@ -61,7 +74,7 @@ ADMINS = {
 # -----------------------
 @app.route("/")
 def home():
-    return "✅ API Key Server (Persistent) is running!"
+    return "✅ API Key Server (Database) is running!"
 
 @app.route("/verify")
 def verify():
@@ -69,21 +82,19 @@ def verify():
     if not key:
         return jsonify({"valid": False, "reason": "Không cung cấp API Key."}), 400
 
-    keys = load_keys()
+    # Tìm key trong database
+    key_obj = ApiKey.query.filter_by(key=key).first()
     
-    # ===================== SỬA ĐỔI API RESPONSE =====================
-    if key in keys:
+    if key_obj:
         return jsonify({"valid": True})
     else:
-        # Trả về lý do rõ ràng, khớp với logic của login_window.py
         return jsonify({"valid": False, "reason": "API Key không hợp lệ hoặc đã hết hạn."}), 401
 
 # -----------------------
 # Admin web UI & actions
-# (Giữ nguyên không thay đổi)
+# (Logic đã được cập nhật để dùng DB)
 # -----------------------
 
-# Simple HTML templates (render_template_string used to avoid separate files)
 LOGIN_HTML = """
 <!doctype html>
 <title>Admin Login</title>
@@ -115,10 +126,10 @@ DASHBOARD_HTML = """
       <option value="{{k}}">{{k}}</option>
     {% endfor %}
   </select>
-  <button type="submit">Remove Key</button>
+  <button type: "submit">Remove Key</button>
 </form>
 
-<h3>Danh sách keys hiện có (Lưu tại: {{ keys_file }})</h3>
+<h3>Danh sách keys hiện có (Lưu trong Database)</h3>
 <ul>
   {% for k in keys %}
     <li>{{ k }}</li>
@@ -126,16 +137,16 @@ DASHBOARD_HTML = """
 </ul>
 """
 
-# Admin landing - show login or dashboard depending on session
 @app.route("/admin")
 def admin_index():
     if session.get("admin_user"):
-        keys = load_keys()
-        return render_template_string(DASHBOARD_HTML, user=session["admin_user"], keys=keys, keys_file=KEYS_FILE)
+        # Lấy keys từ DB
+        keys_obj = ApiKey.query.order_by(ApiKey.key).all()
+        keys_list = [k.key for k in keys_obj]
+        return render_template_string(DASHBOARD_HTML, user=session["admin_user"], keys=keys_list)
     else:
         return render_template_string(LOGIN_HTML, error=None)
 
-# Process login
 @app.route("/admin/login", methods=["POST"])
 def admin_login():
     username = request.form.get("username", "")
@@ -147,80 +158,58 @@ def admin_login():
     else:
         return render_template_string(LOGIN_HTML, error="Sai username hoặc password")
 
-# Logout
 @app.route("/admin/logout")
 def admin_logout():
     session.pop("admin_user", None)
     return redirect(url_for("admin_index"))
 
-# Add key (from dashboard form)
 @app.route("/admin/add_key", methods=["POST"])
 def admin_add_key():
     if "admin_user" not in session:
         abort(403)
-    new_key = request.form.get("key", "").strip()
-    if not new_key:
+    new_key_str = request.form.get("key", "").strip()
+    if not new_key_str:
         return redirect(url_for("admin_index"))
-    keys = load_keys()
-    if new_key in keys:
-        # simple message: redirect (could show message; keeping simple)
-        return redirect(url_for("admin_index"))
-    keys.append(new_key)
-    save_keys(keys)
+    
+    # Kiểm tra xem key đã tồn tại chưa
+    existing_key = ApiKey.query.filter_by(key=new_key_str).first()
+    if not existing_key:
+        # Thêm key mới vào DB
+        new_key_obj = ApiKey(key=new_key_str)
+        db.session.add(new_key_obj)
+        db.session.commit()
+        
     return redirect(url_for("admin_index"))
 
-# Remove key (from dashboard form)
 @app.route("/admin/remove_key", methods=["POST"])
 def admin_remove_key():
     if "admin_user" not in session:
         abort(403)
-    key = request.form.get("key", "").strip()
-    keys = load_keys()
-    if key in keys:
-        keys.remove(key)
-        save_keys(keys)
+    key_to_remove_str = request.form.get("key", "").strip()
+    
+    # Tìm key trong DB
+    key_obj = ApiKey.query.filter_by(key=key_to_remove_str).first()
+    if key_obj:
+        # Xóa key
+        db.session.delete(key_obj)
+        db.session.commit()
+        
     return redirect(url_for("admin_index"))
 
-# Optional programmatic endpoints (still available, protected by credentials)
-# Add key via GET/POST using credentials query (backwards-compatible)
-@app.route("/add_key")
-def add_key_quick():
-    user = request.args.get("user")
-    passwd = request.args.get("pass")
-    new_key = request.args.get("key")
-    if not (user and passwd and new_key):
-        return jsonify({"error": "Missing parameters"}), 400
-    if user not in ADMINS or ADMINS[user] != passwd:
-        return jsonify({"error": "Unauthorized"}), 403
-    keys = load_keys()
-    if new_key in keys:
-        return jsonify({"message": "Key already exists"})
-    keys.append(new_key)
-    save_keys(keys)
-    return jsonify({"success": True, "added": new_key})
-
-# Remove key via query (protected)
-@app.route("/remove_key")
-def remove_key_quick():
-    user = request.args.get("user")
-    passwd = request.args.get("pass")
-    key = request.args.get("key")
-    if not (user and passwd and key):
-        return jsonify({"error": "Missing parameters"}), 400
-    if user not in ADMINS or ADMINS[user] != passwd:
-        return jsonify({"error": "Unauthorized"}), 403
-    keys = load_keys()
-    if key in keys:
-        keys.remove(key)
-        save_keys(keys)
-        return jsonify({"success": True, "removed": key})
-    else:
-        return jsonify({"message": "Key not found"}), 404
+# (Các endpoint /add_key và /remove_key cũ đã bị xóa để tăng bảo mật,
+# chỉ nên dùng giao diện /admin)
 
 # -----------------------
 # Run
 # -----------------------
 if __name__ == "__main__":
+    # Thử tạo DB và keys mặc định khi chạy local
+    if not os.environ.get("RENDER"):
+        with app.app_context():
+            db.create_all()
+            init_default_keys()
+        
     port = int(os.environ.get("PORT", 5000))
-    # Chạy trên 0.0.0.0 để Render có thể truy cập
+    # Dùng host="0.0.0.0" để Render truy cập được
     app.run(host="0.0.0.0", port=port)
+
