@@ -6,26 +6,52 @@ from flask import (
 import json, os
 
 app = Flask(__name__)
-# ⚠️ Thay đổi giá trị này thành một chuỗi ngẫu nhiên dài (bí mật)
-app.secret_key = os.environ.get("APP_SECRET_KEY", "replace_this_with_a_random_secret")
 
-KEYS_FILE = "keys.json"
+# ===================== SỬA ĐỔI BẢO MẬT =====================
+# BẮT BUỘC: Bạn phải đặt biến này trong Environment Variables trên Render
+# (Ví dụ: một chuỗi ngẫu nhiên dài 32 ký tự)
+app.secret_key = os.environ.get("APP_SECRET_KEY")
+if not app.secret_key:
+    # App sẽ không khởi động nếu thiếu key này
+    raise ValueError("Chưa đặt APP_SECRET_KEY trong Environment Variables!")
+
+# ===================== SỬA ĐỔI LƯU TRỮ =====================
+# Render Disks được gắn vào /data
+# Chúng ta sẽ lưu file keys.json ở đó để nó không bị mất khi server khởi động lại.
+DATA_DIR = os.environ.get("RENDER_DISK_MOUNT_PATH", "/data")
+KEYS_FILE = os.path.join(DATA_DIR, "keys.json")
+
+# Fallback cho local development (nếu chạy ở máy bạn, nó sẽ lưu ở thư mục hiện tại)
+if not os.path.exists(DATA_DIR) and not os.environ.get("RENDER"):
+    print("Cảnh báo: Không tìm thấy /data. Chạy ở chế độ local dev, lưu key vào '.'")
+    DATA_DIR = "."
+    KEYS_FILE = os.path.join(DATA_DIR, "keys.json")
+
+# Đảm bảo thư mục data tồn tại (chỉ chạy 1 lần)
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # Mặc định tạo file keys.json nếu chưa có
 if not os.path.exists(KEYS_FILE):
+    print(f"Không tìm thấy {KEYS_FILE}, tạo file key mặc định...")
     with open(KEYS_FILE, "w") as f:
         json.dump({"valid_keys": ["DUONG123", "VIP2025", "TESTKEY"]}, f, indent=4)
 
 def load_keys():
-    with open(KEYS_FILE, "r") as f:
-        return json.load(f)["valid_keys"]
+    try:
+        with open(KEYS_FILE, "r") as f:
+            return json.load(f)["valid_keys"]
+    except FileNotFoundError:
+        # Xử lý nếu file bị xóa thủ công
+        with open(KEYS_FILE, "w") as f:
+            json.dump({"valid_keys": []}, f, indent=4)
+        return []
 
 def save_keys(keys):
     with open(KEYS_FILE, "w") as f:
         json.dump({"valid_keys": keys}, f, indent=4)
 
-# ADMIN ACCOUNTS: username -> password (plain text here for simplicity).
-# ⚠️ Vì bảo mật, bạn nên đổi mật khẩu và/hoặc lưu hash (mình có hướng dẫn nếu cần).
+# ADMIN ACCOUNTS: username -> password
+# ⚠️ Vẫn là plain text, bạn nên đổi mật khẩu này!
 ADMINS = {
     "duong2024": "duongpizza"
 }
@@ -35,16 +61,26 @@ ADMINS = {
 # -----------------------
 @app.route("/")
 def home():
-    return "✅ API Key Server is running!"
+    return "✅ API Key Server (Persistent) is running!"
 
 @app.route("/verify")
 def verify():
     key = request.args.get("key", "")
+    if not key:
+        return jsonify({"valid": False, "reason": "Không cung cấp API Key."}), 400
+
     keys = load_keys()
-    return jsonify({"valid": key in keys})
+    
+    # ===================== SỬA ĐỔI API RESPONSE =====================
+    if key in keys:
+        return jsonify({"valid": True})
+    else:
+        # Trả về lý do rõ ràng, khớp với logic của login_window.py
+        return jsonify({"valid": False, "reason": "API Key không hợp lệ hoặc đã hết hạn."}), 401
 
 # -----------------------
 # Admin web UI & actions
+# (Giữ nguyên không thay đổi)
 # -----------------------
 
 # Simple HTML templates (render_template_string used to avoid separate files)
@@ -82,7 +118,7 @@ DASHBOARD_HTML = """
   <button type="submit">Remove Key</button>
 </form>
 
-<h3>Danh sách keys hiện có</h3>
+<h3>Danh sách keys hiện có (Lưu tại: {{ keys_file }})</h3>
 <ul>
   {% for k in keys %}
     <li>{{ k }}</li>
@@ -95,7 +131,7 @@ DASHBOARD_HTML = """
 def admin_index():
     if session.get("admin_user"):
         keys = load_keys()
-        return render_template_string(DASHBOARD_HTML, user=session["admin_user"], keys=keys)
+        return render_template_string(DASHBOARD_HTML, user=session["admin_user"], keys=keys, keys_file=KEYS_FILE)
     else:
         return render_template_string(LOGIN_HTML, error=None)
 
@@ -186,4 +222,5 @@ def remove_key_quick():
 # -----------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    # Chạy trên 0.0.0.0 để Render có thể truy cập
     app.run(host="0.0.0.0", port=port)

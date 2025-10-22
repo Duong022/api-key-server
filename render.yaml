@@ -2,6 +2,10 @@ services:
   - type: web
     name: api-key-server
     env: python
-    buildCommand: ""
+    buildCommand: "pip install -r requirements.txt" # Thêm lệnh build
     startCommand: "python server.py"
     plan: free
+    disks:
+      - name: data-disk # Tên của ổ đĩa
+        mountPath: /data # Gắn ổ đĩa vào thư mục /data
+        sizeGB: 1
