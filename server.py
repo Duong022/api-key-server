@@ -3,66 +3,25 @@ from flask import (
     Flask, request, jsonify, session,
     redirect, url_for, render_template_string, abort
 )
-from flask_sqlalchemy import SQLAlchemy
 import json, os
 
 app = Flask(__name__)
 
 # ===================== SỬA ĐỔI BẢO MẬT =====================
-# BẮT BUỘC: Bạn phải đặt biến này trong Environment Variables trên Render
+# BẮT BUỘC: Bạn vẫn phải đặt biến này trong Environment Variables trên Render
 app.secret_key = os.environ.get("APP_SECRET_KEY")
 if not app.secret_key:
     # App sẽ không khởi động nếu thiếu key này
     raise ValueError("Chưa đặt APP_SECRET_KEY trong Environment Variables!")
 
-# ===================== SỬA ĐỔI LƯU TRỮ (DATABASE) =====================
-# Lấy DATABASE_URL (Render tự động cung cấp qua envVars trong render.yaml)
-db_url = os.environ.get('DATABASE_URL')
-if not db_url:
-    raise ValueError("Chưa đặt DATABASE_URL!")
-
-# Fix lỗi "postgresql://" mà Heroku/Render hay dùng
-if db_url.startswith("postgres://"):
-    db_url = db_url.replace("postgres://", "postgresql://", 1)
-
-app.config['SQLALCHEMY_DATABASE_URI'] = db_url
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-db = SQLAlchemy(app)
-
-# Định nghĩa Bảng (Model) để lưu API keys
-class ApiKey(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    key = db.Column(db.String(100), unique=True, nullable=False)
-
-    def __repr__(self):
-        return f'<ApiKey {self.key}>'
-
-def create_db():
-    """Hàm này được gọi bởi render.yaml (buildCommand) để tạo bảng."""
-    print("Connecting to DB and creating tables...")
-    try:
-        with app.app_context():
-            db.create_all()
-        print("Database tables created successfully (hoặc đã tồn tại).")
-    except Exception as e:
-        print(f"Lỗi khi tạo database: {e}")
-        # Thử tạo key mặc định nếu bảng đã có
-        try:
-            init_default_keys()
-        except Exception as e2:
-            print(f"Lỗi khi thêm key mặc định: {e2}")
-
-def init_default_keys():
-    """Thêm key mặc định nếu database trống."""
-    with app.app_context():
-        if ApiKey.query.count() == 0:
-            print("Database trống, thêm keys mặc định...")
-            default_keys = ["DUONG123", "VIP2025", "TESTKEY"]
-            for k in default_keys:
-                if not ApiKey.query.filter_by(key=k).first():
-                    db.session.add(ApiKey(key=k))
-            db.session.commit()
-            print("Đã thêm keys mặc định.")
+# ===================== SỬA ĐỔI LƯU TRỮ =====================
+# Thay vì file hay DB, chúng ta dùng một TẬP HỢP (set) trong bộ nhớ.
+# Khi server restart, danh sách này sẽ được reset về mặc định.
+VALID_KEYS = {
+    "DUONG123",
+    "VIP2025",
+    "TESTKEY"
+}
 
 # ADMIN ACCOUNTS
 ADMINS = {
@@ -74,7 +33,7 @@ ADMINS = {
 # -----------------------
 @app.route("/")
 def home():
-    return "✅ API Key Server (Database) is running!"
+    return "✅ API Key Server (In-Memory) is running!"
 
 @app.route("/verify")
 def verify():
@@ -82,17 +41,15 @@ def verify():
     if not key:
         return jsonify({"valid": False, "reason": "Không cung cấp API Key."}), 400
 
-    # Tìm key trong database
-    key_obj = ApiKey.query.filter_by(key=key).first()
-    
-    if key_obj:
+    # Kiểm tra key có trong TẬP HỢP (set) không
+    if key in VALID_KEYS:
         return jsonify({"valid": True})
     else:
         return jsonify({"valid": False, "reason": "API Key không hợp lệ hoặc đã hết hạn."}), 401
 
 # -----------------------
 # Admin web UI & actions
-# (Logic đã được cập nhật để dùng DB)
+# (Logic đã được cập nhật để dùng bộ nhớ)
 # -----------------------
 
 LOGIN_HTML = """
@@ -129,7 +86,7 @@ DASHBOARD_HTML = """
   <button type: "submit">Remove Key</button>
 </form>
 
-<h3>Danh sách keys hiện có (Lưu trong Database)</h3>
+<h3>Danh sách keys hiện có (Lưu trong bộ nhớ)</h3>
 <ul>
   {% for k in keys %}
     <li>{{ k }}</li>
@@ -140,9 +97,8 @@ DASHBOARD_HTML = """
 @app.route("/admin")
 def admin_index():
     if session.get("admin_user"):
-        # Lấy keys từ DB
-        keys_obj = ApiKey.query.order_by(ApiKey.key).all()
-        keys_list = [k.key for k in keys_obj]
+        # Lấy keys từ bộ nhớ
+        keys_list = sorted(list(VALID_KEYS))
         return render_template_string(DASHBOARD_HTML, user=session["admin_user"], keys=keys_list)
     else:
         return render_template_string(LOGIN_HTML, error=None)
@@ -171,13 +127,8 @@ def admin_add_key():
     if not new_key_str:
         return redirect(url_for("admin_index"))
     
-    # Kiểm tra xem key đã tồn tại chưa
-    existing_key = ApiKey.query.filter_by(key=new_key_str).first()
-    if not existing_key:
-        # Thêm key mới vào DB
-        new_key_obj = ApiKey(key=new_key_str)
-        db.session.add(new_key_obj)
-        db.session.commit()
+    # Thêm key vào TẬP HỢP (set) trong bộ nhớ
+    VALID_KEYS.add(new_key_str)
         
     return redirect(url_for("admin_index"))
 
@@ -187,28 +138,16 @@ def admin_remove_key():
         abort(403)
     key_to_remove_str = request.form.get("key", "").strip()
     
-    # Tìm key trong DB
-    key_obj = ApiKey.query.filter_by(key=key_to_remove_str).first()
-    if key_obj:
-        # Xóa key
-        db.session.delete(key_obj)
-        db.session.commit()
+    # Xóa key khỏi TẬP HỢP (set) trong bộ nhớ
+    if key_to_remove_str in VALID_KEYS:
+        VALID_KEYS.remove(key_to_remove_str)
         
     return redirect(url_for("admin_index"))
-
-# (Các endpoint /add_key và /remove_key cũ đã bị xóa để tăng bảo mật,
-# chỉ nên dùng giao diện /admin)
 
 # -----------------------
 # Run
 # -----------------------
 if __name__ == "__main__":
-    # Thử tạo DB và keys mặc định khi chạy local
-    if not os.environ.get("RENDER"):
-        with app.app_context():
-            db.create_all()
-            init_default_keys()
-        
     port = int(os.environ.get("PORT", 5000))
     # Dùng host="0.0.0.0" để Render truy cập được
     app.run(host="0.0.0.0", port=port)
